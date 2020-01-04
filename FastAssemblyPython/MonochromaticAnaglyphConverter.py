@@ -3,6 +3,7 @@ from tkinter import *
 import logging
 import threading
 import time
+import tkinter
 import PIL
 
 

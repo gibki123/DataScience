@@ -9,48 +9,49 @@ import copy
 import multiprocessing as mp
 from io import BytesIO
 from multiprocessing import Process, Manager
-from numba import jit, cuda
+#from numba import jit, cuda
 
 global imageLeft
 global imageRight
 
 
-@jit(target ="cuda")
-def ThreadFunctionWithArrays(startPointY, endPointY, pixelsWidth, pixelsArray1, pixelsArray2, arrayToReturn, procNumber):
+#@jit(target ="cuda")
+def ThreadFunctionWithArrays(startPointY, endPointY, pixelsWidth, pixelsArray1, pixelsArray2, arrayToReturn, procNumber, isDubois):
     numberOfRows = endPointY - startPointY
     pixelArray = GenerateEmptyPartMatrix(pixelsWidth, numberOfRows)
+    pixel_values1 = pixelsArray1.load()
+    pixel_values2 = pixelsArray2.load()
     y = 0
-    for j in range(startPointY, endPointY):
-        for i in range(0, pixelsWidth):
-            r1, g1, b1 = pixelsArray1.getpixel((i, j))
-            r2, g2, b2 = pixelsArray2.getpixel((i, j))
-            pixelArray[y][i] = (
-                r1 * 0.4561 + g1 * 0.500484 + b1 * 0.176381 - r2 * 0.0434706 - g2 * 0.0879388 - b2 * 0.00155529,
-                - r1 * 0.0400822 - g1 * 0.0378246 - b1 * 0.0157589 + r2 * 0.378476 + g2 * 0.73364 - b2 * 0.0184503,
-                - r1 * 0.0152161 - g1 * 0.0205971 - b1 * 0.00546856 - r2 * 0.0721527 - g2 * 0.112961 + b2 * 1.2264)
-        y += 1
-    arrayToReturn[procNumber] = pixelArray
-
-
-def ThreadFunctionWithArraysSimple(startPointY, endPointY, pixelsWidth, pixelsArray1, pixelsArray2, arrayToReturn,
-                             procNumber):
-    numberOfRows = endPointY - startPointY
-    pixelArray = GenerateEmptyPartMatrix(pixelsWidth, numberOfRows)
-    y = 0
-    for j in range(startPointY, endPointY):
-        for i in range(0, pixelsWidth):
-            r1, g1, b1 = pixelsArray1.getpixel((i, j))
-            r2, g2, b2 = pixelsArray2.getpixel((i, j))
-            pixelArray[y][i] = (
-                0.299 * r1 + 0.587 * g1 + 0.114 * b1,
-                0.299 * r2 + 0.587 * g2 + 0.114 * b2,
-                0.299 * r2 + 0.587 * g2 + 0.114 * b2)
-        y += 1
+    if(isDubois == True):
+        for j in range(startPointY, endPointY):
+            for i in range(0, pixelsWidth):
+                r1, g1, b1 = pixel_values1[i, j]
+                r2, g2, b2 = pixel_values2[i, j]
+                pixelArray[y][i] = (
+                    int(r1 * 0.4561 + g1 * 0.500484 + b1 * 0.176381 - r2 * 0.0434706 - g2 * 0.0879388 - b2 * 0.00155529),
+                    int(- r1 * 0.0400822 - g1 * 0.0378246 - b1 * 0.0157589 + r2 * 0.378476 + g2 * 0.73364 - b2 * 0.0184503),
+                    int(- r1 * 0.0152161 - g1 * 0.0205971 - b1 * 0.00546856 - r2 * 0.0721527 - g2 * 0.112961 + b2 * 1.2264))
+            y += 1
+    else:
+        for j in range(startPointY, endPointY):
+            for i in range(0, pixelsWidth):
+                r1, g1, b1 = pixel_values1[i, j]
+                r2, g2, b2 = pixel_values2[i, j]
+                pixelArray[y][i] = (
+                    int(0.299 * r1 + 0.587 * g1 + 0.114 * b1),
+                    int(0.299 * r2 + 0.587 * g2 + 0.114 * b2),
+                    int(0.299 * r2 + 0.587 * g2 + 0.114 * b2))
+            y += 1
     arrayToReturn[procNumber] = pixelArray
 
 
 def AsmMethod(arr1, arr2, size, arrayToReturn, procNumber):
     array = asm.convert_image(arr1, arr2, size)
+    arrayToReturn[procNumber] = array
+
+
+def AsmSimpleMethod(arr1, arr2, size, arrayToReturn, procNumber):
+    array = asm.simpleconvert_image(arr1, arr2, size)
     arrayToReturn[procNumber] = array
 
 
@@ -62,7 +63,7 @@ def CreateImage(anaglyphPixelArray, name):
 
 def CreateImageFromBuffer(pixelArray, name, width, height):
     newImage = Image.frombytes("RGB", (width, height), pixelArray)
-    newImage = newImage.transpose(Image.ROTATE_180)
+    newImage = newImage.transpose(Image.FLIP_LEFT_RIGHT)
     newImage.save(name)
 
 
@@ -71,122 +72,155 @@ def GenerateEmptyPartMatrix(width, height):
     return pixelArray
 
 
-def StartDuboisThreading():
+def StartDuboisThreadsPy(rowsPerThread, height, width, d1, processes, numberOfThreads):
     global imageLeft
     global imageRight
-    numberOfThreads = threadSlider.get()
-    width, height = imageLeft.size
-    rgb_imgLeft = imageLeft.convert('RGB')
-    rgb_imgRight = imageRight.convert('RGB')
-    rowsPerThread = int(height / numberOfThreads)
-    processes = list()
-    start = time.time()
-    manager = Manager()
-    d1 = manager.dict()
+    for i in range(0, numberOfThreads):
+        if (i != numberOfThreads - 1):
+            processes.append(Process(target=ThreadFunctionWithArrays, args=(
+                i * rowsPerThread, (i + 1) * rowsPerThread, width, imageLeft, imageRight, d1, i, True)))
+            processes[i].start()
+        else:
+            processes.append(Process(target=ThreadFunctionWithArrays, args=(
+                i * rowsPerThread, height, width, imageLeft, imageRight, d1, i, True)))
+            processes[i].start()
 
-    if (rbValue.get() == 2):
-        for i in range(0, numberOfThreads):
-            if (i != numberOfThreads - 1):
-                processes.append(Process(target=ThreadFunctionWithArrays, args=(
-                    i * rowsPerThread, (i + 1) * rowsPerThread, width, rgb_imgLeft, rgb_imgRight, d1, i)))
-                processes[i].start()
-            else:
-                processes.append(Process(target=ThreadFunctionWithArrays, args=(
-                    i * rowsPerThread, height, width, rgb_imgLeft, rgb_imgRight, d1, i)))
-                processes[i].start()
-    else:
-        for i in range(0, numberOfThreads):
-            bytes1 = BytesIO()
-            imageLeft.save(bytes1, 'bmp')
-            bytes2 = BytesIO()
-            imageRight.save(bytes2, 'bmp')
-            bytes1 = bytes1.getvalue()
-            bytes2 = bytes2.getvalue()
-            bytes1 = bytes1[54:]
-            bytes2 = bytes2[54:]
-            sizeOfBytes = height*width*3
+def StartCasualThreadsPy(rowsPerThread, height, width, d1, processes, numberOfThreads):
+    global imageLeft
+    global imageRight
+    for i in range(0, numberOfThreads):
+        if (i != numberOfThreads - 1):
+            processes.append(Process(target=ThreadFunctionWithArrays, args=(
+                i * rowsPerThread, (i + 1) * rowsPerThread, width, imageLeft, imageRight, d1, i, False)))
+            processes[i].start()
+        else:
+            processes.append(Process(target=ThreadFunctionWithArrays, args=(
+                i * rowsPerThread, height, width, imageLeft, imageRight, d1, i, False)))
+            processes[i].start()
 
-            if (i != numberOfThreads - 1):
-                processBytes1 = bytes1[i * rowsPerThread*width:(i+1)*rowsPerThread*width*3]
-                processBytes2 = bytes2[i * rowsPerThread*width:(i+1)*rowsPerThread*width*3]
-                processes.append(Process(target=AsmMethod, args=(
-                    processBytes1, processBytes2, width*rowsPerThread, d1, i)))
-                processes[i].start()
-            else:
-                processBytes1 = bytes1[i * rowsPerThread * width:sizeOfBytes]
-                processBytes2 = bytes2[i * rowsPerThread * width:sizeOfBytes]
-                processes.append(Process(target=AsmMethod, args=(
-                    processBytes1, processBytes2, sizeOfBytes-(i*rowsPerThread), d1, i)))
-                processes[i].start()
 
+def StartDuboisThreadsAsm(bytes1,bytes2,rowsPerThread, width, d1, processes, sizeOfBytes, numberOfThreads):
+    for i in range(0, numberOfThreads):
+        if (i != numberOfThreads - 1):
+            processBytes1 = bytes1[i * rowsPerThread * width * 3:(i + 1) * rowsPerThread * width * 3]
+            processBytes2 = bytes2[i * rowsPerThread * width * 3:(i + 1) * rowsPerThread * width * 3]
+            processes.append(Process(target=AsmMethod, args=(
+                processBytes1, processBytes2, width * rowsPerThread * 3, d1, i)))
+            processes[i].start()
+        else:
+            processBytes1 = bytes1[i * rowsPerThread * width * 3:sizeOfBytes]
+            processBytes2 = bytes2[i * rowsPerThread * width * 3:sizeOfBytes]
+            processes.append(Process(target=AsmMethod, args=(
+                processBytes1, processBytes2, sizeOfBytes - (i * rowsPerThread * width * 3), d1, i)))
+            processes[i].start()
+
+
+def StartCasualThreadsAsm(bytes1, bytes2, rowsPerThread, width, d1, processes, sizeOfBytes, numberOfThreads):
+    for i in range(0, numberOfThreads):
+        if (i != numberOfThreads - 1):
+            processBytes1 = bytes1[i * rowsPerThread * width * 3:(i + 1) * rowsPerThread * width * 3]
+            processBytes2 = bytes2[i * rowsPerThread * width * 3:(i + 1) * rowsPerThread * width * 3]
+            processes.append(Process(target=AsmSimpleMethod, args=(
+                processBytes1, processBytes2, width * rowsPerThread * 3, d1, i)))
+            processes[i].start()
+        else:
+            processBytes1 = bytes1[i * rowsPerThread * width * 3:sizeOfBytes]
+            processBytes2 = bytes2[i * rowsPerThread * width * 3:sizeOfBytes]
+            processes.append(Process(target=AsmSimpleMethod, args=(
+                processBytes1, processBytes2, sizeOfBytes - (i * rowsPerThread * width * 3), d1, i)))
+            processes[i].start()
+
+
+def JoinProcesses(processes, numberOfThreads, d1, optionNumber):
     pixelArray = None
     for i in range(0, numberOfThreads):
         processes[i].join()
         if pixelArray is None:
             pixelArray = d1[i]
         else:
-            pixelArray = np.append(pixelArray, d1[i], axis=0)
-    end = time.time()
-    timeElapsed = end - start
-    operationTimeText.configure(text='Time of operation: ' + timeElapsed.__str__())
-    image = None
-
-    if rbValue.get() == 2 :
-        CreateImage(pixelArray, 'DuboisAnaglyph.png')
-        image = Image.open('DuboisAnaglyph.png')
-    else:
-        CreateImageFromBuffer(pixelArray, 'DuboisAnaglyphASM.png', width, height)
-        image = Image.open('DuboisAnaglyphASM.png')
-
-    image = image.resize((150, 267))
-    render = ImageTk.PhotoImage(image)
-    imageLabel4.configure(image=render)
-    imageLabel4.photo_ref = render
+            if (optionNumber == 2):
+                pixelArray += d1[i]
+            else:
+                pixelArray = d1[i] + pixelArray
+    return pixelArray
 
 
-def StartCasualThreading():
+def PrepareBytesData(height, width):
     global imageLeft
     global imageRight
+    bytes1 = BytesIO()
+    imageLeft.save(bytes1, 'bmp')
+    bytes2 = BytesIO()
+    imageRight.save(bytes2, 'bmp')
+    bytes1 = bytes1.getvalue()
+    bytes2 = bytes2.getvalue()
+    bytes1 = bytes1[54:]
+    bytes2 = bytes2[54:]
+    sizeOfBytes = height * width * 3
+    return bytes1, bytes2, sizeOfBytes
+
+
+def SaveOutputImage(pixelArray, optionNumber, isDubois, width, height):
+    if (optionNumber == 2):
+        if (isDubois == True):
+            CreateImage(pixelArray, 'DuboisAnaglyph.png')
+            return Image.open('DuboisAnaglyph.png')
+        else:
+            CreateImage(pixelArray, 'DuboisSimpleAnaglyph.png')
+            return Image.open('DuboisSimpleAnaglyph.png')
+    else:
+        if (isDubois == True):
+            CreateImageFromBuffer(pixelArray, 'DuboisAnaglyphASM.png', width, height)
+            return Image.open('DuboisAnaglyphASM.png')
+        else:
+            CreateImageFromBuffer(pixelArray, 'DuboisSimpleAnaglyphASM.png', width, height)
+            return Image.open('DuboisSimpleAnaglyphASM.png')
+
+def RenderOutputImage(image, isDubois):
+    image = image.resize((150, 267))
+    render = ImageTk.PhotoImage(image)
+    if(isDubois == True):
+        imageLabel4.configure(image=render)
+        imageLabel4.photo_ref = render
+    else:
+        imageLabel3.configure(image=render)
+        imageLabel3.photo_ref = render
+
+def StartThreading(isDubois):
+
+    # Prepare Data for threading
     numberOfThreads = threadSlider.get()
     width, height = imageLeft.size
-    rgb_imgLeft = imageLeft.convert('RGB')
-    rgb_imgRight = imageRight.convert('RGB')
     rowsPerThread = int(height / numberOfThreads)
     processes = list()
+    manager = Manager()
+    d1 = manager.dict()
+    optionNumber = rbValue.get()
+
+    # Start timer
     start = time.time()
-    manager = mp.Manager()
-    dictionaries = manager.dict()
 
-    for i in range(0, numberOfThreads):
-        copyImgLeft = copy.deepcopy(rgb_imgLeft)
-        copyImgRight = copy.deepcopy(rgb_imgRight)
-        if (i != numberOfThreads - 1):
-            processes.append(Process(target=ThreadFunctionWithArraysSimple, args=(
-                i * rowsPerThread, (i + 1) * rowsPerThread, width, copyImgLeft, copyImgRight,
-                dictionaries, i)))
-            processes[i].start()
+    if (optionNumber == 2):
+        if (isDubois == True):
+            StartDuboisThreadsPy(rowsPerThread, height, width, d1, processes, numberOfThreads)
         else:
-            processes.append(Process(target=ThreadFunctionWithArraysSimple, args=(
-                i * rowsPerThread, height, width, copyImgLeft, copyImgRight,
-                dictionaries, i)))
-            processes[i].start()
-    pixelArray = None
-    for i in range(0, numberOfThreads):
-        processes[i].join()
-        if pixelArray is None:
-            pixelArray = dictionaries[i]
+            StartCasualThreadsPy(rowsPerThread, height, width, d1, processes, numberOfThreads)
+    else:
+        bytes1, bytes2, sizeOfBytes = PrepareBytesData(height, width)
+        if (isDubois == True):
+            StartDuboisThreadsAsm(bytes1, bytes2, rowsPerThread, width, d1, processes, sizeOfBytes, numberOfThreads)
         else:
-            pixelArray = np.append(pixelArray, dictionaries[i], axis=0)
+            StartCasualThreadsAsm(bytes1, bytes2, rowsPerThread, width, d1, processes, sizeOfBytes, numberOfThreads)
 
+    pixelArray = JoinProcesses(processes, numberOfThreads, d1, optionNumber)
+    # end timer
     end = time.time()
     timeElapsed = end - start
     operationTimeText.configure(text='Time of operation: ' + timeElapsed.__str__())
-    CreateImage(pixelArray, 'SimpleAnaglyph.png')
-    image = Image.open('SimpleAnaglyph.png')
-    image = image.resize((150, 267))
-    render = ImageTk.PhotoImage(image)
-    imageLabel3.configure(image=render)
-    imageLabel3.photo_ref = render
+
+    image = SaveOutputImage(pixelArray, optionNumber, isDubois, width, height)
+    RenderOutputImage(image, isDubois)
+
 
 def OnLoadImage(numberOfPhoto):
     path = askopenfilename()
@@ -216,7 +250,6 @@ def OnLoadImage(numberOfPhoto):
         messagebox.showerror('Image error', 'Image was not loaded properly')
 
 
-
 # Main program starts here
 image1Loaded = False
 image2Loaded = False
@@ -243,9 +276,9 @@ loadImg1B = Button(root, text='Load image1', command=lambda: OnLoadImage(1), wid
                    height=5)
 loadImg2B = Button(root, text='Load image2', command=lambda: OnLoadImage(2), width=16,
                    height=5)
-GenerateCasualB = Button(root, text='Generate Basic\n Anaglyph', command=lambda: StartCasualThreading(), width=16, height=5,
+GenerateCasualB = Button(root, text='Generate Basic\n Anaglyph', command=lambda: StartThreading(False), width=16, height=5,
                          state='disabled')
-GenerateDuboisB = Button(root, text='Generate Dubois\n Anaglyph', command=lambda: StartDuboisThreading(), width=16,
+GenerateDuboisB = Button(root, text='Generate Dubois\n Anaglyph', command=lambda: StartThreading(True), width=16,
                          height=5,
                          state='disabled')
 loadImg1B.grid(row=2, column=0, sticky='n')
@@ -274,7 +307,7 @@ operationTimeText = Label(root, text='Time of operation: ')
 operationTimeText.grid(row=3, column=2, columnspan=2, sticky='n')
 
 # Create threadSlider
-threadSlider = Scale(root, from_=1, to=8, orient='horizontal', length=300)
+threadSlider = Scale(root, from_=1, to=64, orient='horizontal', length=300)
 threadSlider.grid(row=4, column=0, columnspan=2, sticky='n')
 
 # Add frame for radio buttons
